@@ -26,6 +26,7 @@ import { READ_APEX_TRIGGER, handleReadApexTrigger, ReadApexTriggerArgs } from ".
 import { WRITE_APEX_TRIGGER, handleWriteApexTrigger, WriteApexTriggerArgs } from "./tools/writeApexTrigger.js";
 import { EXECUTE_ANONYMOUS, handleExecuteAnonymous, ExecuteAnonymousArgs } from "./tools/executeAnonymous.js";
 import { MANAGE_DEBUG_LOGS, handleManageDebugLogs, ManageDebugLogsArgs } from "./tools/manageDebugLogs.js";
+import { SEARCH, FETCH, handleSearch, handleFetch, SearchArgs, FetchArgs } from "./tools/search-fetch.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 
 dotenv.config();
@@ -54,6 +55,8 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
     MANAGE_FIELD,
     MANAGE_FIELD_PERMISSIONS,
     SEARCH_ALL,
+    SEARCH,
+    FETCH,
     READ_APEX,
     WRITE_APEX,
     READ_APEX_TRIGGER,
@@ -223,6 +226,42 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         };
 
         return await handleSearchAll(conn, validatedArgs);
+      }
+
+      case "search": {
+        const searchArgs = args as Record<string, unknown>;
+        if (!searchArgs.searchTerm) {
+          throw new Error('searchTerm is required for search');
+        }
+
+        // Type check and conversion
+        const validatedArgs: SearchArgs = {
+          searchTerm: searchArgs.searchTerm as string,
+          objects: searchArgs.objects as string[] | undefined,
+          fields: searchArgs.fields as string[] | undefined,
+          whereClause: searchArgs.whereClause as string | undefined,
+          limit: searchArgs.limit as number | undefined,
+          divisionFilter: searchArgs.divisionFilter as string | undefined
+        };
+
+        return await handleSearch(conn, validatedArgs);
+      }
+
+      case "fetch": {
+        const fetchArgs = args as Record<string, unknown>;
+        if (!fetchArgs.recordId) {
+          throw new Error('recordId is required for fetch');
+        }
+
+        // Type check and conversion
+        const validatedArgs: FetchArgs = {
+          recordId: fetchArgs.recordId as string,
+          fields: fetchArgs.fields as string[] | undefined,
+          includeAllFields: fetchArgs.includeAllFields as boolean | undefined,
+          includeSystemFields: fetchArgs.includeSystemFields as boolean | undefined
+        };
+
+        return await handleFetch(conn, validatedArgs);
       }
 
       case "salesforce_read_apex": {
