@@ -244,13 +244,13 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
       case "fetch": {
         const fetchArgs = args as Record<string, unknown>;
-        if (!fetchArgs.query) {
-          throw new Error('query is required for fetch');
+        if (!fetchArgs.id) {
+          throw new Error('id is required for fetch');
         }
 
         // Type check and conversion
         const validatedArgs: FetchArgs = {
-          query: fetchArgs.query as string
+          id: fetchArgs.id as string
         };
 
         return await handleFetch(conn, validatedArgs);

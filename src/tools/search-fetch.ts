@@ -18,16 +18,16 @@ export const SEARCH: Tool = {
 
 export const FETCH: Tool = {
   name: "fetch",
-  description: "Fetch document content by query or identifier",
+  description: "Fetch complete content for a specific document by its ID",
   inputSchema: {
     type: "object",
     properties: {
-      query: {  // Changed from 'objectIds' array to 'query' string
+      id: {  // Must be 'id' not 'query' or 'objectIds'
         type: "string",
-        description: "Query to fetch specific document or record ID"
+        description: "File ID or document ID to fetch"
       }
     },
-    required: ["query"],
+    required: ["id"],
     additionalProperties: false
   }
 };
@@ -37,7 +37,7 @@ export interface SearchArgs {
 }
 
 export interface FetchArgs {
-  query: string;  // Changed from objectIds array to query string
+  id: string;  // Changed to match the expected 'id' parameter
 }
 
 interface SearchResult {
@@ -205,109 +205,103 @@ export async function handleSearch(conn: any, args: SearchArgs) {
 }
 
 /**
- * Handles fetching complete content for specific documents
+ * Handles fetching complete content for a specific document by ID
  */
 export async function handleFetch(conn: any, args: FetchArgs) {
   try {
-    const { query } = args;
+    const { id } = args;  // Now using 'id' parameter
     
-    if (!query || query.trim() === '') {
+    if (!id || id.trim() === '') {
       return {
         content: [{
           type: "text",
           text: JSON.stringify({ 
-            documents: [],
-            error: "No query provided"
+            document: null,
+            error: "No ID provided"
           })
         }],
         isError: true,
       };
     }
     
-    // Check if query looks like a Salesforce ID
-    const possibleId = query.trim();
-    const documents: DocumentResult[] = [];
+    const recordId = id.trim();
     
-    if (possibleId.length === 15 || possibleId.length === 18) {
-      // Treat as record ID
-      const validation = validateRecordId(possibleId);
-      if (validation.isValid) {
-        const objectType = getObjectTypeFromId(possibleId);
-        const fieldsToFetch = getDefaultFields(objectType, false);
-        
-        const soql = `SELECT ${fieldsToFetch.join(', ')} FROM ${objectType} WHERE Id = '${possibleId}'`;
-        
-        try {
-          const result = await conn.query(soql);
-          if (result.records.length > 0) {
-            const record = result.records[0];
-            documents.push({
-              id: record.Id,
-              title: record.Name || `${objectType} Record`,
-              content: JSON.stringify(record),
-              metadata: {
-                type: objectType,
-                url: `salesforce://record/${record.Id}`
-              }
-            });
-          }
-        } catch (err) {
-          console.error(`Error fetching ${possibleId}:`, err);
-        }
-      }
-    } else {
-      // Treat as a search query - fetch first few matching records
-      const searchObjects = ['Account', 'Contact', 'Lead', 'Opportunity'];
-      const searchFields = ['Id', 'Name'];
-      
-      const soslQuery = `FIND {${query}*} IN ALL FIELDS RETURNING ${searchObjects.map(obj => `${obj}(${searchFields.join(', ')})`).join(', ')} LIMIT 5`;
-      
-      const searchResults = await conn.search(soslQuery);
-      
-      for (const objectResult of searchResults) {
-        const records = objectResult.records || [];
-        for (const record of records.slice(0, 2)) { // Fetch details for first 2 records of each type
-          const objectType = record.attributes?.type || 'Unknown';
-          const fieldsToFetch = getDefaultFields(objectType, false);
-          
-          try {
-            const soql = `SELECT ${fieldsToFetch.join(', ')} FROM ${objectType} WHERE Id = '${record.Id}'`;
-            const result = await conn.query(soql);
-            
-            if (result.records.length > 0) {
-              const fullRecord = result.records[0];
-              documents.push({
-                id: fullRecord.Id,
-                title: fullRecord.Name || `${objectType} Record`,
-                content: JSON.stringify(fullRecord),
-                metadata: {
-                  type: objectType,
-                  url: `salesforce://record/${fullRecord.Id}`
-                }
-              });
-            }
-          } catch (err) {
-            console.error(`Error fetching details for ${record.Id}:`, err);
-          }
-        }
-      }
+    // Validate if it's a Salesforce record ID
+    const validation = validateRecordId(recordId);
+    if (!validation.isValid) {
+      return {
+        content: [{
+          type: "text",
+          text: JSON.stringify({
+            document: null,
+            error: validation.error
+          })
+        }],
+        isError: true,
+      };
     }
     
-    return {
-      content: [{
-        type: "text",
-        text: JSON.stringify({ documents })
-      }],
-      isError: false,
-    };
+    const objectType = getObjectTypeFromId(recordId);
+    const fieldsToFetch = getDefaultFields(objectType, false);
+    
+    const soql = `SELECT ${fieldsToFetch.join(', ')} FROM ${objectType} WHERE Id = '${recordId}'`;
+    
+    try {
+      const result = await conn.query(soql);
+      
+      if (result.records.length === 0) {
+        return {
+          content: [{
+            type: "text",
+            text: JSON.stringify({
+              document: null,
+              error: `No record found with ID: ${recordId}`
+            })
+          }],
+          isError: true,
+        };
+      }
+      
+      const record = result.records[0];
+      const document = {
+        id: record.Id,
+        title: record.Name || `${objectType} Record`,
+        content: JSON.stringify(record),
+        metadata: {
+          type: objectType,
+          url: `salesforce://record/${record.Id}`
+        }
+      };
+      
+      return {
+        content: [{
+          type: "text",
+          text: JSON.stringify({ document })  // Return single document, not array
+        }],
+        isError: false,
+      };
+      
+    } catch (err) {
+      console.error(`Error fetching ${recordId}:`, err);
+      return {
+        content: [{
+          type: "text",
+          text: JSON.stringify({
+            document: null,
+            error: err instanceof Error ? err.message : String(err)
+          })
+        }],
+        isError: true,
+      };
+    }
     
   } catch (error) {
-    console.error('Error fetching records:', error);
+    console.error('Error fetching record:', error);
     return {
       content: [{
         type: "text",
         text: JSON.stringify({ 
-          documents: [],
+          document: null,
           error: error instanceof Error ? error.message : String(error)
         })
       }],
