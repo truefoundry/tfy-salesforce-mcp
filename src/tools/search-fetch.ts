@@ -18,18 +18,17 @@ export const SEARCH: Tool = {
 
 export const FETCH: Tool = {
   name: "fetch",
-  description: "Fetch complete content for specific documents by their IDs.",
+  description: "Fetch document content by query or identifier",
   inputSchema: {
     type: "object",
     properties: {
-      objectIds: {  // Changed to match expected pattern
-        type: "array",
-        items: { type: "string" },
-        description: "Array of object IDs to fetch"
+      query: {  // Changed from 'objectIds' array to 'query' string
+        type: "string",
+        description: "Query to fetch specific document or record ID"
       }
     },
-    required: ["objectIds"],
-    additionalProperties: false  // Add this to enforce strict schema
+    required: ["query"],
+    additionalProperties: false
   }
 };
 
@@ -38,7 +37,7 @@ export interface SearchArgs {
 }
 
 export interface FetchArgs {
-  objectIds: string[];  // Changed from single recordId to array
+  query: string;  // Changed from objectIds array to query string
 }
 
 interface SearchResult {
@@ -206,51 +205,91 @@ export async function handleSearch(conn: any, args: SearchArgs) {
 }
 
 /**
- * Handles fetching complete content for specific documents by their IDs
+ * Handles fetching complete content for specific documents
  */
 export async function handleFetch(conn: any, args: FetchArgs) {
   try {
-    const { objectIds } = args;
+    const { query } = args;
     
-    if (!objectIds || objectIds.length === 0) {
+    if (!query || query.trim() === '') {
       return {
         content: [{
           type: "text",
           text: JSON.stringify({ 
             documents: [],
-            error: "No object IDs provided"
+            error: "No query provided"
           })
         }],
         isError: true,
       };
     }
     
+    // Check if query looks like a Salesforce ID
+    const possibleId = query.trim();
     const documents: DocumentResult[] = [];
     
-    for (const recordId of objectIds) {
-      // Your existing fetch logic for each ID
-      const cleanRecordId = recordId.trim();
-      const objectType = getObjectTypeFromId(cleanRecordId);
-      const fieldsToFetch = getDefaultFields(objectType, false);
-      
-      const soql = `SELECT ${fieldsToFetch.join(', ')} FROM ${objectType} WHERE Id = '${cleanRecordId}'`;
-      
-      try {
-        const result = await conn.query(soql);
-        if (result.records.length > 0) {
-          const record = result.records[0];
-          documents.push({
-            id: record.Id,
-            title: record.Name || `${objectType} Record`,
-            content: JSON.stringify(record),
-            metadata: {
-              type: objectType,
-              url: `salesforce://record/${record.Id}`
-            }
-          });
+    if (possibleId.length === 15 || possibleId.length === 18) {
+      // Treat as record ID
+      const validation = validateRecordId(possibleId);
+      if (validation.isValid) {
+        const objectType = getObjectTypeFromId(possibleId);
+        const fieldsToFetch = getDefaultFields(objectType, false);
+        
+        const soql = `SELECT ${fieldsToFetch.join(', ')} FROM ${objectType} WHERE Id = '${possibleId}'`;
+        
+        try {
+          const result = await conn.query(soql);
+          if (result.records.length > 0) {
+            const record = result.records[0];
+            documents.push({
+              id: record.Id,
+              title: record.Name || `${objectType} Record`,
+              content: JSON.stringify(record),
+              metadata: {
+                type: objectType,
+                url: `salesforce://record/${record.Id}`
+              }
+            });
+          }
+        } catch (err) {
+          console.error(`Error fetching ${possibleId}:`, err);
         }
-      } catch (err) {
-        console.error(`Error fetching ${recordId}:`, err);
+      }
+    } else {
+      // Treat as a search query - fetch first few matching records
+      const searchObjects = ['Account', 'Contact', 'Lead', 'Opportunity'];
+      const searchFields = ['Id', 'Name'];
+      
+      const soslQuery = `FIND {${query}*} IN ALL FIELDS RETURNING ${searchObjects.map(obj => `${obj}(${searchFields.join(', ')})`).join(', ')} LIMIT 5`;
+      
+      const searchResults = await conn.search(soslQuery);
+      
+      for (const objectResult of searchResults) {
+        const records = objectResult.records || [];
+        for (const record of records.slice(0, 2)) { // Fetch details for first 2 records of each type
+          const objectType = record.attributes?.type || 'Unknown';
+          const fieldsToFetch = getDefaultFields(objectType, false);
+          
+          try {
+            const soql = `SELECT ${fieldsToFetch.join(', ')} FROM ${objectType} WHERE Id = '${record.Id}'`;
+            const result = await conn.query(soql);
+            
+            if (result.records.length > 0) {
+              const fullRecord = result.records[0];
+              documents.push({
+                id: fullRecord.Id,
+                title: fullRecord.Name || `${objectType} Record`,
+                content: JSON.stringify(fullRecord),
+                metadata: {
+                  type: objectType,
+                  url: `salesforce://record/${fullRecord.Id}`
+                }
+              });
+            }
+          } catch (err) {
+            console.error(`Error fetching details for ${record.Id}:`, err);
+          }
+        }
       }
     }
     
