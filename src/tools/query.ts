@@ -6,23 +6,47 @@ export const QUERY_RECORDS: Tool = {
 
 NOTE: For queries with GROUP BY, aggregate functions (COUNT, SUM, AVG, etc.), or HAVING clauses, use salesforce_aggregate_query instead.
 
+IMPORTANT: Time-based queries are automatically enhanced to be more inclusive:
+- "LAST_WEEK" becomes "LAST_N_DAYS:10" (includes more recent data)
+- "THIS_WEEK" becomes "THIS_WEEK OR TODAY" (ensures today is included)
+- Date ranges are expanded to include TODAY when querying recent data
+
+Recommended fields for common objects:
+- Opportunity: ["Id", "Name", "StageName", "Amount", "CloseDate", "CreatedDate", "LastModifiedDate", "Account.Name", "Owner.Name"]
+- Account: ["Id", "Name", "Industry", "Type", "CreatedDate", "LastModifiedDate", "Owner.Name"]  
+- Contact: ["Id", "FirstName", "LastName", "Email", "Account.Name", "CreatedDate", "LastModifiedDate"]
+- Case: ["Id", "CaseNumber", "Subject", "Status", "Priority", "CreatedDate", "LastModifiedDate", "Account.Name", "Contact.Name"]
+
+⚠️  IMPORTANT: If Account.Industry or custom fields like Account.Account_Tier__c return null:
+1. The field might not exist in your Salesforce org
+2. The field might be empty/not populated for those records  
+3. You might not have access permissions to that field
+4. Use salesforce_describe_object to verify field names and availability
+
 Examples:
-1. Parent-to-child query (e.g., Account with Contacts):
+1. NEW Pipeline Opportunities (added recently):
+   - objectName: "Opportunity"
+   - fields: ["Id", "Name", "StageName", "Amount", "CloseDate", "CreatedDate", "Account.Name"]
+   - whereClause: "CreatedDate = LAST_WEEK" (finds opportunities ADDED this week)
+
+2. CLOSING Opportunities (expected to close soon):
+   - objectName: "Opportunity"  
+   - fields: ["Id", "Name", "StageName", "Amount", "CloseDate", "CreatedDate", "Account.Name"]
+   - whereClause: "CloseDate = LAST_WEEK" (finds opportunities CLOSING this week)
+
+🚨 CRITICAL: For "new pipeline" or "pipeline added", use CreatedDate NOT CloseDate!
+
+3. Parent-to-child query (e.g., Account with Contacts):
    - objectName: "Account"
    - fields: ["Name", "(SELECT Id, FirstName, LastName FROM Contacts)"]
 
-2. Child-to-parent query (e.g., Contact with Account details):
+4. Child-to-parent query (e.g., Contact with Account details):
    - objectName: "Contact"
    - fields: ["FirstName", "LastName", "Account.Name", "Account.Industry"]
 
-3. Multiple level query (e.g., Contact -> Account -> Owner):
+5. Multiple level query (e.g., Contact -> Account -> Owner):
    - objectName: "Contact"
    - fields: ["Name", "Account.Name", "Account.Owner.Name"]
-
-4. Related object filtering:
-   - objectName: "Contact"
-   - fields: ["Name", "Account.Name"]
-   - whereClause: "Account.Industry = 'Technology'"
 
 Note: When using relationship fields:
 - Use dot notation for parent relationships (e.g., "Account.Name")
@@ -102,6 +126,64 @@ function validateRelationshipFields(fields: string[]): { isValid: boolean; error
   return { isValid: true };
 }
 
+// Helper function to enhance time-based WHERE clauses to be more inclusive
+function enhanceTimeBasedQuery(whereClause: string): string {
+  if (!whereClause) return whereClause;
+  
+  const now = new Date();
+  const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  
+  // Common time range patterns and their more inclusive alternatives
+  const timeEnhancements = [
+    // "last week" should include today and be more generous
+    {
+      pattern: /LAST_WEEK/gi,
+      replacement: `LAST_N_DAYS:10` // More inclusive than just 7 days
+    },
+    // "this week" should definitely include today
+    {
+      pattern: /THIS_WEEK/gi,
+      replacement: `THIS_WEEK OR TODAY`
+    },
+    // "last 7 days" should be more inclusive
+    {
+      pattern: /LAST_N_DAYS:7/gi,
+      replacement: `LAST_N_DAYS:10`
+    },
+    // Add TODAY to any date range that might miss it
+    {
+      pattern: /CreatedDate\s*>=\s*(\d{4}-\d{2}-\d{2})/gi,
+      replacement: (match: string, dateStr: string) => {
+        const queryDate = new Date(dateStr);
+        const daysBetween = Math.floor((now.getTime() - queryDate.getTime()) / (1000 * 60 * 60 * 24));
+        if (daysBetween <= 10) {
+          // If querying recent data, make sure to include today
+          return `(${match} OR CreatedDate = TODAY)`;
+        }
+        return match;
+      }
+    }
+  ];
+  
+  let enhancedClause = whereClause;
+  
+  timeEnhancements.forEach(enhancement => {
+    if (typeof enhancement.replacement === 'string') {
+      enhancedClause = enhancedClause.replace(enhancement.pattern, enhancement.replacement);
+    } else {
+      enhancedClause = enhancedClause.replace(enhancement.pattern, enhancement.replacement);
+    }
+  });
+  
+  // Log if we made any enhancements
+  if (enhancedClause !== whereClause) {
+    console.log(`[QUERY_ENHANCEMENT] Original WHERE: ${whereClause}`);
+    console.log(`[QUERY_ENHANCEMENT] Enhanced WHERE: ${enhancedClause}`);
+  }
+  
+  return enhancedClause;
+}
+
 // Helper function to format relationship query results
 function formatRelationshipResults(record: any, field: string, prefix = ''): string {
   if (field.includes('.')) {
@@ -125,6 +207,30 @@ export async function handleQueryRecords(conn: any, args: QueryArgs) {
   const { objectName, fields, whereClause, orderBy, limit } = args;
 
   try {
+    // Log the fields being requested for debugging
+    console.log(`[QUERY_FIELDS] Requested fields for ${objectName}:`, fields);
+    
+    // Analyze the WHERE clause for potential issues
+    if (whereClause) {
+      console.log(`[QUERY_ANALYSIS] WHERE clause analysis:`);
+      
+      // Check for common date field confusion
+      if (whereClause.includes('CloseDate') && objectName === 'Opportunity') {
+        const hasRecentDateFilter = whereClause.includes('2025-09') || whereClause.includes('THIS_WEEK') || whereClause.includes('LAST_WEEK');
+        if (hasRecentDateFilter) {
+          console.log(`[QUERY_WARNING] ⚠️  Using CloseDate for recent opportunities may miss new pipeline!`);
+          console.log(`[QUERY_WARNING] 💡 Consider using CreatedDate instead to find opportunities added recently`);
+          console.log(`[QUERY_WARNING] 📅 CloseDate = when deal closes, CreatedDate = when opportunity was added`);
+        }
+      }
+      
+      // Check for missing CreatedDate in fields when filtering by time
+      const hasTimeFilter = whereClause.includes('Date') || whereClause.includes('WEEK') || whereClause.includes('DAY');
+      if (hasTimeFilter && !fields.includes('CreatedDate') && !fields.includes('LastModifiedDate')) {
+        console.log(`[QUERY_SUGGESTION] 💡 Consider adding 'CreatedDate' or 'LastModifiedDate' to fields for better context`);
+      }
+    }
+    
     // Validate relationship field syntax
     const validation = validateRelationshipFields(fields);
     if (!validation.isValid) {
@@ -137,13 +243,32 @@ export async function handleQueryRecords(conn: any, args: QueryArgs) {
       };
     }
 
+    // Enhance time-based queries to be more inclusive
+    const enhancedWhereClause = whereClause ? enhanceTimeBasedQuery(whereClause) : whereClause;
+    
+    // Apply smart defaults for better results
+    const smartLimit = limit || (enhancedWhereClause ? 200 : 100); // Higher limit for filtered queries
+    const smartOrderBy = orderBy || (fields.includes('CreatedDate') ? 'CreatedDate DESC' : 
+                                   fields.includes('LastModifiedDate') ? 'LastModifiedDate DESC' : 
+                                   orderBy);
+    
+    // Log smart enhancements
+    if (!limit) {
+      console.log(`[QUERY_ENHANCEMENT] Applied smart limit: ${smartLimit}`);
+    }
+    if (!orderBy && smartOrderBy) {
+      console.log(`[QUERY_ENHANCEMENT] Applied smart ordering: ${smartOrderBy}`);
+    }
+    
     // Construct SOQL query
     let soql = `SELECT ${fields.join(', ')} FROM ${objectName}`;
-    if (whereClause) soql += ` WHERE ${whereClause}`;
-    if (orderBy) soql += ` ORDER BY ${orderBy}`;
-    if (limit) soql += ` LIMIT ${limit}`;
+    if (enhancedWhereClause) soql += ` WHERE ${enhancedWhereClause}`;
+    if (smartOrderBy) soql += ` ORDER BY ${smartOrderBy}`;
+    soql += ` LIMIT ${smartLimit}`;
 
+    console.log(`[SOQL] Executing query: ${soql}`);
     const result = await conn.query(soql);
+    console.log(`[SOQL] Query returned ${result.records.length} records`);
     
     // Format the output
     const formattedRecords = result.records.map((record: any, index: number) => {
@@ -172,25 +297,46 @@ export async function handleQueryRecords(conn: any, args: QueryArgs) {
     const errorMessage = error instanceof Error ? error.message : String(error);
     let enhancedError = errorMessage;
 
-    if (errorMessage.includes('INVALID_FIELD')) {
-      // Try to identify which relationship field caused the error
-      const fieldMatch = errorMessage.match(/(?:No such column |Invalid field: )['"]?([^'")\s]+)/);
+    console.log(`[QUERY_ERROR] Original error:`, errorMessage);
+
+    if (errorMessage.includes('INVALID_FIELD') || errorMessage.includes('No such column')) {
+      // Try to identify which field caused the error
+      const fieldMatch = errorMessage.match(/(?:No such column |Invalid field: )['"]?([^'")\s,]+)/);
       if (fieldMatch) {
         const invalidField = fieldMatch[1];
+        console.log(`[QUERY_ERROR] Invalid field identified:`, invalidField);
+        
         if (invalidField.includes('.')) {
-          enhancedError = `Invalid relationship field "${invalidField}". Please check:\n` +
-            `1. The relationship name is correct\n` +
-            `2. The field exists on the related object\n` +
-            `3. You have access to the field\n` +
-            `4. For custom relationships, ensure you're using '__r' suffix`;
+          enhancedError = `❌ Invalid relationship field "${invalidField}"\n\n` +
+            `Troubleshooting steps:\n` +
+            `1. Check if the relationship name is correct (e.g., "Account" not "account")\n` +
+            `2. Verify the field exists on the related object\n` +
+            `3. Ensure you have access permissions to the field\n` +
+            `4. For custom relationships, use '__r' suffix (e.g., "Custom_Object__r.Name")\n\n` +
+            `💡 Try using salesforce_describe_object on "${objectName}" to see available relationship fields.`;
+        } else {
+          enhancedError = `❌ Invalid field "${invalidField}" on ${objectName} object\n\n` +
+            `Troubleshooting steps:\n` +
+            `1. Check field name spelling and capitalization\n` +
+            `2. Verify the field exists on the ${objectName} object\n` +
+            `3. Ensure you have access permissions to the field\n` +
+            `4. For custom fields, ensure '__c' suffix is included\n\n` +
+            `💡 Try using salesforce_describe_object on "${objectName}" to see all available fields.`;
         }
       }
+    } else if (errorMessage.includes('MALFORMED_QUERY')) {
+      enhancedError = `❌ Malformed SOQL query\n\n` +
+        `The query syntax is invalid. Common issues:\n` +
+        `1. Missing quotes around string values in WHERE clause\n` +
+        `2. Invalid date format (use YYYY-MM-DD or Salesforce date literals)\n` +
+        `3. Incorrect aggregate function usage\n\n` +
+        `💡 Check the SOQL syntax and try again.`;
     }
 
     return {
       content: [{
         type: "text",
-        text: `Error executing query: ${enhancedError}`
+        text: `Error executing query: ${enhancedError}\n\n🔍 Query attempted: SELECT ${fields.join(', ')} FROM ${objectName}${whereClause ? ` WHERE ${whereClause}` : ''}`
       }],
       isError: true,
     };

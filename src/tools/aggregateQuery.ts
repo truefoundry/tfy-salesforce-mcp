@@ -6,6 +6,12 @@ export const AGGREGATE_QUERY: Tool = {
 
 NOTE: For regular queries without GROUP BY or aggregates, use salesforce_query_records instead.
 
+🚨 CRITICAL DATE FIELD USAGE:
+- For NEW pipeline analysis: Use CreatedDate (when opportunities were added)
+- For CLOSING pipeline analysis: Use CloseDate (when opportunities are expected to close)
+- For "pipeline added this week" → CreatedDate = THIS_WEEK
+- For "deals closing this week" → CloseDate = THIS_WEEK
+
 This tool handles:
 1. GROUP BY queries (single/multiple fields, related objects, date functions)
 2. Aggregate functions: COUNT(), COUNT_DISTINCT(), SUM(), AVG(), MIN(), MAX()
@@ -151,6 +157,40 @@ function validateWhereClause(whereClause: string | undefined): { isValid: boolea
   return { isValid: true };
 }
 
+// Helper function to enhance time-based WHERE clauses to be more inclusive
+function enhanceTimeBasedQuery(whereClause: string): string {
+  if (!whereClause) return whereClause;
+  
+  // Common time range patterns and their more inclusive alternatives
+  const timeEnhancements = [
+    {
+      pattern: /LAST_WEEK/gi,
+      replacement: `LAST_N_DAYS:10`
+    },
+    {
+      pattern: /THIS_WEEK/gi,
+      replacement: `THIS_WEEK OR TODAY`
+    },
+    {
+      pattern: /LAST_N_DAYS:7/gi,
+      replacement: `LAST_N_DAYS:10`
+    }
+  ];
+  
+  let enhancedClause = whereClause;
+  
+  timeEnhancements.forEach(enhancement => {
+    enhancedClause = enhancedClause.replace(enhancement.pattern, enhancement.replacement);
+  });
+  
+  if (enhancedClause !== whereClause) {
+    console.log(`[AGGREGATE_ENHANCEMENT] Original WHERE: ${whereClause}`);
+    console.log(`[AGGREGATE_ENHANCEMENT] Enhanced WHERE: ${enhancedClause}`);
+  }
+  
+  return enhancedClause;
+}
+
 // Helper function to validate ORDER BY fields
 function validateOrderBy(orderBy: string | undefined, groupByFields: string[], selectFields: string[]): { isValid: boolean; error?: string } {
   if (!orderBy) return { isValid: true };
@@ -180,6 +220,20 @@ export async function handleAggregateQuery(conn: any, args: AggregateQueryArgs) 
   const { objectName, selectFields, groupByFields, whereClause, havingClause, orderBy, limit } = args;
 
   try {
+    // Analyze the WHERE clause for potential issues
+    if (whereClause) {
+      console.log(`[AGGREGATE_ANALYSIS] WHERE clause analysis:`);
+      
+      // Check for common date field confusion
+      if (whereClause.includes('CloseDate') && objectName === 'Opportunity') {
+        const hasRecentDateFilter = whereClause.includes('2025-09') || whereClause.includes('THIS_WEEK') || whereClause.includes('LAST_WEEK');
+        if (hasRecentDateFilter) {
+          console.log(`[AGGREGATE_WARNING] ⚠️  Using CloseDate for recent opportunities may miss new pipeline!`);
+          console.log(`[AGGREGATE_WARNING] 💡 Consider using CreatedDate instead to find opportunities added recently`);
+          console.log(`[AGGREGATE_WARNING] 📅 CloseDate = when deal closes, CreatedDate = when opportunity was added`);
+        }
+      }
+    }
     // Validate GROUP BY contains all non-aggregate fields
     const groupByValidation = validateGroupByFields(selectFields, groupByFields);
     if (!groupByValidation.isValid) {
@@ -217,15 +271,20 @@ export async function handleAggregateQuery(conn: any, args: AggregateQueryArgs) 
       };
     }
 
+    // Enhance time-based queries to be more inclusive
+    const enhancedWhereClause = whereClause ? enhanceTimeBasedQuery(whereClause) : whereClause;
+    
     // Construct SOQL query
     let soql = `SELECT ${selectFields.join(', ')} FROM ${objectName}`;
-    if (whereClause) soql += ` WHERE ${whereClause}`;
+    if (enhancedWhereClause) soql += ` WHERE ${enhancedWhereClause}`;
     soql += ` GROUP BY ${groupByFields.join(', ')}`;
     if (havingClause) soql += ` HAVING ${havingClause}`;
     if (orderBy) soql += ` ORDER BY ${orderBy}`;
     if (limit) soql += ` LIMIT ${limit}`;
 
+    console.log(`[AGGREGATE_SOQL] Executing query: ${soql}`);
     const result = await conn.query(soql);
+    console.log(`[AGGREGATE_SOQL] Query returned ${result.records.length} grouped records`);
     
     // Format the output
     const formattedRecords = result.records.map((record: any, index: number) => {
